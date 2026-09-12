@@ -1,0 +1,36 @@
+# Stage-2 variant: same shape/training setup as configs/baseline_tiny.yaml,
+# swapping full attention for LongNet-style dilated segment attention, so the
+# benchmark comparison isolates the effect of attn_type.
+#
+# Effective span = ceil(segment_length / dilation_rate) = ceil(32/4) = 8,
+# same effective span as configs/local_w8_tiny.yaml's window=8, but spread
+# across a wider segment instead of a tight trailing window.
+
+run_name: dilated_tiny
+
+data_path: data/tinyshakespeare.txt
+val_fraction: 0.1
+
+# model
+attn_type: dilated
+segment_length: 32
+dilation_rate: 4
+n_layer: 4
+n_head: 4
+n_embd: 128
+block_size: 128
+dropout: 0.1
+bias: false
+# vocab_size is set at runtime from the tokenizer
+
+# training
+batch_size: 32
+max_iters: 2000
+eval_interval: 200
+eval_iters: 50
+learning_rate: 0.001
+weight_decay: 0.01
+grad_clip: 1.0
+seed: 1337
+
+out_dir: experiments/dilated_tiny

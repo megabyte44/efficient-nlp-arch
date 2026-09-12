@@ -1,0 +1,36 @@
+# Same model as configs/local_w8_tiny.yaml, but executed through the
+# blocked/online-softmax (FlashAttention-style) path instead of the plain
+# explicit mask. Same math, same weights-shape, same analytical FLOPs --
+# this config exists purely to compare measured latency/memory against
+# local_w8_tiny.yaml and confirm the chunked path actually delivers the
+# saving the plain-mask implementation's docstring said it couldn't.
+
+run_name: local_w8_tiny_chunked
+
+data_path: data/tinyshakespeare.txt
+val_fraction: 0.1
+
+# model
+attn_type: local
+window_size: 8
+chunked: true
+chunk_size: 16
+n_layer: 4
+n_head: 4
+n_embd: 128
+block_size: 128
+dropout: 0.1
+bias: false
+# vocab_size is set at runtime from the tokenizer
+
+# training
+batch_size: 32
+max_iters: 2000
+eval_interval: 200
+eval_iters: 50
+learning_rate: 0.001
+weight_decay: 0.01
+grad_clip: 1.0
+seed: 1337
+
+out_dir: experiments/local_w8_tiny_chunked

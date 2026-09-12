@@ -32,6 +32,9 @@ def attention_span(cfg):
     """
     if cfg["attn_type"] == "local":
         return min(cfg["window_size"], cfg["block_size"])
+    if cfg["attn_type"] == "dilated":
+        span = min(cfg["segment_length"], cfg["block_size"])
+        return math.ceil(span / cfg["dilation_rate"])
     return cfg["block_size"]
 
 
@@ -47,9 +50,16 @@ def analytical_flops_per_token_forward(cfg, n_params):
     span (see `attention_span`) so variants that restrict attention (e.g.
     local/windowed) show the corresponding drop in this term.
     """
-    L, H = cfg["n_layer"], cfg["n_head"]
-    Q, T = cfg["n_embd"] // cfg["n_head"], attention_span(cfg)
-    total_fwd_bwd = 6 * n_params + 12 * L * H * Q * T
+    L = cfg["n_layer"]
+    if cfg["attn_type"] in ("s4", "mamba"):
+        # No qkv/attention term at all: a diagonal state-space mixer costs
+        # O(n_embd * d_state) per token, independent of T -- that's the
+        # whole point of the trick (vs attention's O(T) per-token term).
+        mixer_term = 12 * L * cfg["n_embd"] * cfg["d_state"]
+    else:
+        H, Q, T = cfg["n_head"], cfg["n_embd"] // cfg["n_head"], attention_span(cfg)
+        mixer_term = 12 * L * H * Q * T
+    total_fwd_bwd = 6 * n_params + mixer_term
     return total_fwd_bwd / 3
 
 

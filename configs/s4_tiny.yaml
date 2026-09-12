@@ -1,0 +1,32 @@
+# Stage-2 variant: same shape/training setup as configs/baseline_tiny.yaml,
+# swapping full attention for a diagonal state-space mixer (S4D), so the
+# benchmark comparison isolates the effect of attn_type. No n_head needed --
+# this replaces attention entirely rather than varying it.
+
+run_name: s4_tiny
+
+data_path: data/tinyshakespeare.txt
+val_fraction: 0.1
+
+# model
+attn_type: s4
+d_state: 16
+n_layer: 4
+n_head: 4
+n_embd: 128
+block_size: 128
+dropout: 0.1
+bias: false
+# vocab_size is set at runtime from the tokenizer
+
+# training
+batch_size: 32
+max_iters: 2000
+eval_interval: 200
+eval_iters: 50
+learning_rate: 0.001
+weight_decay: 0.01
+grad_clip: 1.0
+seed: 1337
+
+out_dir: experiments/s4_tiny
