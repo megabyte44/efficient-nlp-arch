@@ -1,0 +1,30 @@
+# Stage-1 baseline, sized for fast CPU iteration/correctness checking.
+# Not the config used for real quality/FLOPs comparisons — those run on GPU
+# (see notebooks/) at larger scale.
+
+run_name: baseline_tiny
+
+data_path: data/tinyshakespeare.txt
+val_fraction: 0.1
+
+# model
+attn_type: full
+n_layer: 4
+n_head: 4
+n_embd: 128
+block_size: 128
+dropout: 0.1
+bias: false
+# vocab_size is set at runtime from the tokenizer
+
+# training
+batch_size: 32
+max_iters: 2000
+eval_interval: 200
+eval_iters: 50
+learning_rate: 0.001
+weight_decay: 0.01
+grad_clip: 1.0
+seed: 1337
+
+out_dir: experiments/baseline_tiny
