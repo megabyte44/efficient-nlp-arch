@@ -21,6 +21,20 @@ from model import GPT
 from utils import get_device, load_config
 
 
+def attention_span(cfg):
+    """Effective number of keys/queries the attention term scales with.
+
+    Full attention: each token attends over the whole sequence -> T.
+    Local/windowed attention: capped at window_size regardless of T.
+    This is what makes the O(T) attention term in the FLOPs formula below
+    actually shrink for windowed attention instead of just replicating
+    full attention's estimate under a different name.
+    """
+    if cfg["attn_type"] == "local":
+        return min(cfg["window_size"], cfg["block_size"])
+    return cfg["block_size"]
+
+
 def analytical_flops_per_token_forward(cfg, n_params):
     """Approximate forward-pass FLOPs/token.
 
@@ -29,10 +43,12 @@ def analytical_flops_per_token_forward(cfg, n_params):
     by 3 (forward:backward FLOPs ratio is ~1:2). This is an analytical
     estimate, not a profiler trace — treat absolute values as approximate,
     but relative comparisons between variants (same formula, different
-    architecture) are meaningful.
+    architecture) are meaningful. T is replaced by the effective attention
+    span (see `attention_span`) so variants that restrict attention (e.g.
+    local/windowed) show the corresponding drop in this term.
     """
     L, H = cfg["n_layer"], cfg["n_head"]
-    Q, T = cfg["n_embd"] // cfg["n_head"], cfg["block_size"]
+    Q, T = cfg["n_embd"] // cfg["n_head"], attention_span(cfg)
     total_fwd_bwd = 6 * n_params + 12 * L * H * Q * T
     return total_fwd_bwd / 3
 

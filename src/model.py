@@ -39,9 +39,58 @@ class CausalSelfAttention(nn.Module):
         return self.resid_dropout(self.proj(y))
 
 
+class LocalCausalSelfAttention(nn.Module):
+    """Causal attention restricted to a fixed-size trailing window.
+
+    Query at position i may attend to keys in [i - window_size + 1, i]
+    (still causal — no peeking ahead). Reduces the attention term from
+    O(T) per token to O(window_size) per token, independent of sequence
+    length once T > window_size. Implemented as an explicit boolean mask
+    over full QK^T rather than a blocked/sparse kernel — correct and easy
+    to verify, but on CPU this doesn't skip the masked-out multiplications,
+    so wall-clock latency won't show the saving that analytical FLOPs do.
+    A real speedup needs a chunked/blocked implementation (candidate
+    follow-up, see ROADMAP.md).
+    """
+
+    def __init__(self, cfg):
+        super().__init__()
+        assert cfg["n_embd"] % cfg["n_head"] == 0
+        self.n_head = cfg["n_head"]
+        self.n_embd = cfg["n_embd"]
+        self.window_size = cfg["window_size"]
+        self.qkv = nn.Linear(cfg["n_embd"], 3 * cfg["n_embd"], bias=cfg["bias"])
+        self.proj = nn.Linear(cfg["n_embd"], cfg["n_embd"], bias=cfg["bias"])
+        self.attn_dropout = nn.Dropout(cfg["dropout"])
+        self.resid_dropout = nn.Dropout(cfg["dropout"])
+
+        block_size = cfg["block_size"]
+        pos = torch.arange(block_size)
+        distance = pos[:, None] - pos[None, :]  # i - j
+        allowed = (distance >= 0) & (distance < self.window_size)  # causal + within window
+        self.register_buffer("attn_mask", allowed, persistent=False)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        q, k, v = self.qkv(x).split(self.n_embd, dim=2)
+        head_dim = C // self.n_head
+        q = q.view(B, T, self.n_head, head_dim).transpose(1, 2)
+        k = k.view(B, T, self.n_head, head_dim).transpose(1, 2)
+        v = v.view(B, T, self.n_head, head_dim).transpose(1, 2)
+
+        mask = self.attn_mask[:T, :T]
+        y = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=mask, dropout_p=self.attn_dropout.p if self.training else 0.0
+        )
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        return self.resid_dropout(self.proj(y))
+
+
 def build_attention(cfg):
     if cfg["attn_type"] == "full":
         return CausalSelfAttention(cfg)
+    if cfg["attn_type"] == "local":
+        return LocalCausalSelfAttention(cfg)
     raise NotImplementedError(
         f"attn_type={cfg['attn_type']!r} not implemented yet — Stage 2 work"
     )

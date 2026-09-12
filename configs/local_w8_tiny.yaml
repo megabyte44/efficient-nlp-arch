@@ -1,0 +1,31 @@
+# Stage-2 variant: same as configs/local_tiny.yaml but with a much tighter
+# window, to actually stress-test where windowed attention's quality starts
+# to degrade relative to full attention (window=32 showed no degradation).
+
+run_name: local_w8_tiny
+
+data_path: data/tinyshakespeare.txt
+val_fraction: 0.1
+
+# model
+attn_type: local
+window_size: 8
+n_layer: 4
+n_head: 4
+n_embd: 128
+block_size: 128
+dropout: 0.1
+bias: false
+# vocab_size is set at runtime from the tokenizer
+
+# training
+batch_size: 32
+max_iters: 2000
+eval_interval: 200
+eval_iters: 50
+learning_rate: 0.001
+weight_decay: 0.01
+grad_clip: 1.0
+seed: 1337
+
+out_dir: experiments/local_w8_tiny

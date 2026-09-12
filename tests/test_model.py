@@ -65,3 +65,62 @@ def test_unimplemented_attn_type_raises():
         assert False, "expected NotImplementedError"
     except NotImplementedError:
         pass
+
+
+def test_local_attn_is_causal():
+    cfg = make_cfg(attn_type="local", window_size=3)
+    model = GPT(cfg)
+    model.eval()
+    idx = torch.randint(0, cfg["vocab_size"], (1, cfg["block_size"]))
+    with torch.no_grad():
+        logits_full, _ = model(idx)
+        idx_truncated = idx.clone()
+        idx_truncated[:, -1] = (idx_truncated[:, -1] + 1) % cfg["vocab_size"]
+        logits_changed, _ = model(idx_truncated)
+    assert torch.allclose(logits_full[:, :-1], logits_changed[:, :-1], atol=1e-5)
+
+
+def test_local_attn_ignores_tokens_outside_window():
+    # Changing a token further back than window_size should not move a later
+    # position's logits at all -- that's the entire point of windowing.
+    # Single layer, so the receptive field is exactly window_size (with
+    # multiple layers it grows by ~window_size per layer, like dilated
+    # convs, which would make this direct a check invalid).
+    cfg = make_cfg(attn_type="local", window_size=3, n_layer=1)
+    model = GPT(cfg)
+    model.eval()
+    idx = torch.randint(0, cfg["vocab_size"], (1, cfg["block_size"]))
+    with torch.no_grad():
+        logits_full, _ = model(idx)
+        idx_edited = idx.clone()
+        idx_edited[:, 0] = (idx_edited[:, 0] + 1) % cfg["vocab_size"]
+        logits_edited, _ = model(idx_edited)
+    # position 0 is the edited token itself, so only compare from position
+    # window_size onward, which should be fully unaffected by position 0.
+    window_size = cfg["window_size"]
+    assert torch.allclose(
+        logits_full[:, window_size:], logits_edited[:, window_size:], atol=1e-5
+    )
+
+
+def test_local_attn_matches_full_when_window_covers_block():
+    # Sanity check: a window as wide as the whole sequence degenerates to
+    # full causal attention (same mask), so outputs should match exactly
+    # given identical weights.
+    torch.manual_seed(0)
+    cfg_full = make_cfg(attn_type="full")
+    torch.manual_seed(0)
+    cfg_local = make_cfg(attn_type="local", window_size=cfg_full["block_size"])
+
+    torch.manual_seed(42)
+    model_full = GPT(cfg_full)
+    torch.manual_seed(42)
+    model_local = GPT(cfg_local)
+    model_full.eval()
+    model_local.eval()
+
+    idx = torch.randint(0, cfg_full["vocab_size"], (1, cfg_full["block_size"]))
+    with torch.no_grad():
+        logits_full, _ = model_full(idx)
+        logits_local, _ = model_local(idx)
+    assert torch.allclose(logits_full, logits_local, atol=1e-5)
