@@ -12,6 +12,7 @@ def main():
     if os.path.exists(out_path):
         print(f"already present: {out_path}")
         return
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
     print(f"downloading {URL}")
     urllib.request.urlretrieve(URL, out_path)
     size = os.path.getsize(out_path)
