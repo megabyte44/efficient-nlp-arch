@@ -276,6 +276,107 @@ class S4DMixer(nn.Module):
         return self.dropout(self.proj(y))
 
 
+def mamba2_sequential_scan(delta, A, B_seq, x_in, C_seq, D, n_heads):
+    """Reference sequential scan for the Mamba-2/SSD-style recurrence, where
+    `A` is a single scalar per *head* -- shared across every channel within
+    that head (`headdim = d_inner / n_heads`) and across every state dim --
+    unlike `MambaMixer`'s Mamba-1/S6 formulation, where `A` is a full
+    (d_inner, d_state) diagonal (independent decay per channel *and* per
+    state). This is Phase 4 of the Mamba-scan investigation (see
+    ROADMAP.md): a distinct architecture, not a modification of the
+    existing MambaMixer, checking what restricting `A` this way buys (or
+    costs) rather than trying to make the existing model imitate it.
+
+    Shapes: delta (B,T,n_heads), A (n_heads,), B_seq/C_seq (B,T,d_state),
+    x_in (B,T,d_inner) with d_inner = n_heads * headdim, D (d_inner,).
+    Returns (B,T,d_inner).
+    """
+    Bsz, T, d_inner = x_in.shape
+    headdim = d_inner // n_heads
+    d_state = B_seq.shape[-1]
+    x_in_h = x_in.view(Bsz, T, n_heads, headdim)
+
+    state = x_in.new_zeros(Bsz, n_heads, headdim, d_state)
+    ys = []
+    for t in range(T):
+        delta_t = delta[:, t]  # (B, H)
+        A_bar = torch.exp(delta_t * A)  # (B, H) -- one scalar per head, not per (channel, state)
+        deltaB_x = (
+            delta_t.view(Bsz, n_heads, 1, 1)
+            * B_seq[:, t].view(Bsz, 1, 1, d_state)
+            * x_in_h[:, t].unsqueeze(-1)
+        )  # (B, H, P, N)
+        state = A_bar.view(Bsz, n_heads, 1, 1) * state + deltaB_x
+        y_t = torch.einsum("bhpn,bn->bhp", state, C_seq[:, t])
+        ys.append(y_t)
+    y = torch.stack(ys, dim=1)  # (B, T, H, P)
+    return y.reshape(Bsz, T, d_inner) + D * x_in
+
+
+def mamba2_chunked_scan(delta, A, B_seq, x_in, C_seq, D, n_heads, chunk_size):
+    """Chunked scan for the same Mamba-2/SSD-style recurrence, exploiting
+    exactly the restriction `mamba2_sequential_scan` describes: because the
+    decay depends only on (batch, time, head) -- not on channel-within-head
+    or state dim -- the intra-chunk decay tensor built below is shaped
+    (B, chunk_size, chunk_size, n_heads), with no (headdim, d_state) factor
+    at all. Compare to Phase 1/2's `mamba_chunked_scan` (a different
+    branch/experiment), whose decay tensor was
+    (B, chunk_size, chunk_size, d_inner, d_state) -- exactly
+    `headdim * d_state` times larger per chunk -- and which Phase 2 found
+    caused a severe, hardware-sensitive slowdown at larger chunk sizes or
+    model widths. This function exists to check whether this restriction
+    actually removes that blowup, at the cost of the coarser (per-head
+    rather than per-channel-and-state) selectivity described above.
+    """
+    Bsz, T, d_inner = x_in.shape
+    headdim = d_inner // n_heads
+    d_state = B_seq.shape[-1]
+    device = delta.device
+    x_in_h = x_in.view(Bsz, T, n_heads, headdim)
+
+    y = x_in.new_empty(Bsz, T, n_heads, headdim)
+    state = x_in.new_zeros(Bsz, n_heads, headdim, d_state)
+
+    n_chunks = math.ceil(T / chunk_size)
+    for c in range(n_chunks):
+        t0, t1 = c * chunk_size, min((c + 1) * chunk_size, T)
+        L = t1 - t0
+
+        delta_c = delta[:, t0:t1]  # (B, L, H)
+        B_c = B_seq[:, t0:t1]  # (B, L, N)
+        C_c = C_seq[:, t0:t1]  # (B, L, N)
+        x_c = x_in_h[:, t0:t1]  # (B, L, H, P)
+
+        logA = delta_c * A.view(1, 1, n_heads)  # (B, L, H)
+        logA_cumsum = torch.cumsum(logA, dim=1)  # (B, L, H)
+
+        carry = (
+            torch.exp(logA_cumsum).unsqueeze(-1).unsqueeze(-1) * state.unsqueeze(1)
+        )  # (B, L, H, P, N)
+
+        # Intra-chunk decay: (B, L, L, H) -- no P/N dims, unlike Phase 1/2's
+        # mamba_chunked_scan. Same "subtract cumsums before exponentiating"
+        # safety as before.
+        decay = logA_cumsum.unsqueeze(2) - logA_cumsum.unsqueeze(1)  # (B, L_i, L_k, H)
+        causal_mask = torch.tril(torch.ones(L, L, dtype=torch.bool, device=device))
+        decay = decay.masked_fill(~causal_mask.view(1, L, L, 1), float("-inf"))
+        decay = torch.exp(decay)
+
+        deltaB_x = (
+            delta_c.view(Bsz, L, n_heads, 1, 1)
+            * B_c.view(Bsz, L, 1, 1, d_state)
+            * x_c.unsqueeze(-1)
+        )  # (B, L, H, P, N)
+        intra = torch.einsum("blkh,bkhpn->blhpn", decay, deltaB_x)  # (B, L, H, P, N)
+
+        state_seq = carry + intra  # state_i for each i in this chunk
+        y[:, t0:t1] = torch.einsum("blhpn,bln->blhp", state_seq, C_c)
+
+        state = state_seq[:, -1]  # end-of-chunk state, carried to the next chunk
+
+    return y.reshape(Bsz, T, d_inner) + D * x_in
+
+
 class MambaMixer(nn.Module):
     """Selective state-space mixer (Mamba's S6), extending S4DMixer's
     diagonal SSM with input-dependent ("selective") Delta/B/C.

@@ -7,8 +7,9 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import torch
+import torch.nn.functional as F
 
-from model import GPT, resolve_layer_cfg
+from model import GPT, resolve_layer_cfg, mamba2_sequential_scan, mamba2_chunked_scan
 
 
 def make_cfg(**overrides):
@@ -315,3 +316,75 @@ def test_hybrid_is_causal():
         idx_truncated[:, -1] = (idx_truncated[:, -1] + 1) % cfg["vocab_size"]
         logits_changed, _ = model(idx_truncated)
     assert torch.allclose(logits_full[:, :-1], logits_changed[:, :-1], atol=1e-5)
+
+
+# --- Phase 4 of the Mamba-scan investigation (see ROADMAP.md): does a
+# Mamba-2/SSD-style scalar-per-head A give a chunked scan that agrees with
+# its own sequential reference? A distinct architecture from MambaMixer's
+# Mamba-1/S6 (full per-channel-per-state diagonal A), not a modification of
+# it -- these functions aren't wired into any nn.Module yet. ---
+
+
+def _random_mamba2_scan_inputs(seed, batch=2, T=17, n_heads=3, headdim=4, d_state=4, requires_grad=False):
+    d_inner = n_heads * headdim
+    g = torch.Generator().manual_seed(seed)
+    delta = F.softplus(torch.randn(batch, T, n_heads, generator=g))
+    A = -torch.exp(torch.arange(1, n_heads + 1).float())  # (n_heads,) -- scalar per head
+    B_seq = torch.randn(batch, T, d_state, generator=g)
+    x_in = torch.randn(batch, T, d_inner, generator=g)
+    C_seq = torch.randn(batch, T, d_state, generator=g)
+    D = torch.ones(d_inner)
+    if requires_grad:
+        for t in (delta, B_seq, x_in, C_seq):
+            t.requires_grad_(True)
+    return delta, A, B_seq, x_in, C_seq, D
+
+
+def test_mamba2_chunked_scan_matches_sequential_across_seqlens_and_chunk_sizes():
+    # Same equivalence property as Phase 1's mamba_chunked_scan check: the
+    # chunked form is a closed-form reorganization of the exact same
+    # recurrence, not an approximation, so it must agree within float32
+    # tolerance for any (sequence length, chunk size, n_heads) combination.
+    atol = 1e-4
+    for seed in (0, 1, 2):
+        for T in (8, 17, 33, 64):
+            for chunk_size in (8, 16, 32, 64):
+                for n_heads in (1, 3):
+                    delta, A, B_seq, x_in, C_seq, D = _random_mamba2_scan_inputs(
+                        seed, T=T, n_heads=n_heads
+                    )
+                    with torch.no_grad():
+                        y_seq = mamba2_sequential_scan(delta, A, B_seq, x_in, C_seq, D, n_heads)
+                        y_chunked = mamba2_chunked_scan(
+                            delta, A, B_seq, x_in, C_seq, D, n_heads, chunk_size
+                        )
+                    max_diff = (y_seq - y_chunked).abs().max().item()
+                    assert torch.allclose(y_seq, y_chunked, atol=atol), (
+                        f"seed={seed} T={T} chunk_size={chunk_size} n_heads={n_heads}: "
+                        f"max abs diff={max_diff}"
+                    )
+
+
+def test_mamba2_chunked_scan_gradients_match_sequential():
+    atol = 1e-3
+    delta, A, B_seq, x_in, C_seq, D = _random_mamba2_scan_inputs(0, T=20, requires_grad=True)
+
+    y_seq = mamba2_sequential_scan(delta, A, B_seq, x_in, C_seq, D, n_heads=3)
+    y_seq.sum().backward()
+    grads_seq = {name: t.grad.clone() for name, t in zip(
+        ("delta", "B_seq", "x_in", "C_seq"), (delta, B_seq, x_in, C_seq)
+    )}
+    for t in (delta, B_seq, x_in, C_seq):
+        t.grad = None
+
+    y_chunked = mamba2_chunked_scan(delta, A, B_seq, x_in, C_seq, D, n_heads=3, chunk_size=8)
+    y_chunked.sum().backward()
+    grads_chunked = {name: t.grad.clone() for name, t in zip(
+        ("delta", "B_seq", "x_in", "C_seq"), (delta, B_seq, x_in, C_seq)
+    )}
+
+    for name in grads_seq:
+        max_diff = (grads_seq[name] - grads_chunked[name]).abs().max().item()
+        assert torch.allclose(grads_seq[name], grads_chunked[name], atol=atol), (
+            f"gradient mismatch for {name}: max abs diff={max_diff}"
+        )

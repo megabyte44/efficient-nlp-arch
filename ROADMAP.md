@@ -116,3 +116,44 @@ Only after an algorithmic variant is working and measured:
   the practical pick if latency matters more than the last bit of quality.
   Confirms the hybrid hypothesis on this toy setup. Not yet explored:
   attention-layer position within the recipe, and the interleaving ratio.
+- 2026-09-13: Mamba-scan investigation, Phase 4 (`experiment/mamba2-scalar-a-ssd`
+  branch; Phases 1-3 are on `experiment/mamba-chunked-scan` -- see that
+  branch's ROADMAP.md for the full log). Phases 1-3 built a chunked scan
+  for MambaMixer's existing Mamba-1/S6 recurrence (full per-(channel,
+  state) diagonal `A`) and found it real but hardware-sensitive: a win on
+  a Colab GPU, a 7x regression on the local RTX 2050, traced to an
+  intra-chunk decay tensor scaling as `O(chunk_size^2 * d_inner *
+  d_state)`. Phase 4 asks the question that sharpened to: does official
+  Mamba-2/SSD's restriction -- `A` a single scalar per head, shared across
+  every channel-within-head and every state dim, instead of independent
+  per (channel, state) -- actually remove that blowup, or was it a red
+  herring? Added `mamba2_sequential_scan`/`mamba2_chunked_scan` (`src/
+  model.py`) implementing that restricted recurrence and its own chunked
+  form (intra-chunk decay tensor now `(B, chunk_size, chunk_size,
+  n_heads)` -- no channel/state dims at all), verified equivalent to its
+  own sequential reference within 1e-4 across sequence lengths, chunk
+  sizes, n_heads, and gradients (`tests/test_model.py`). Deliberately a
+  separate architecture, not a modification of MambaMixer -- the point is
+  to isolate what the restriction itself buys.
+
+  Benchmarked at the exact sizes that broke Phase 2 (`scripts/
+  bench_mamba2_scan.py`, `experiments/mamba2_scan_bench.{json,md}`, same
+  RTX 2050 Phase 2 used). Result: **the blowup is gone, cleanly**. Larger
+  chunk sizes now *monotonically improve* speed instead of catastrophically
+  regressing -- chunk_size=64 is the best point at every size tested, e.g.
+  mamba_tiny's shape: 1.94ms fwd / 5.92ms bwd vs sequential's 40.25ms /
+  162.93ms (a 21x/28x speedup), and peak VRAM grows gently (42MB to 86MB)
+  instead of exploding (Phase 2 saw 77MB to 2.8GB at the same chunk size).
+  The wider-model point that hit 1735ms/4226ms forward in Phase 2 is now
+  6.55ms/3.86ms at the same chunk sizes -- confirms the scalar-per-head
+  restriction is exactly the mechanism that makes Mamba-2's chunked scan
+  hardware-robust, not an unrelated implementation difference.
+
+  Open question this doesn't answer: what does this restriction cost in
+  quality? Scalar-per-head `A` is a real reduction in selectivity (one
+  decay rate per head instead of per channel-and-state) -- per the
+  project's actual objective (quality per unit compute, not speed for its
+  own sake), this needs a real trained comparison (Mamba-1/S6-style
+  MambaMixer vs a Mamba-2-style equivalent, same param budget) before
+  concluding the restriction is worth adopting, not just that it's fast.
+  Not yet built -- these functions aren't wired into a trainable mixer.
