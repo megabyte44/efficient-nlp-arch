@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import torch
 
-from model import GPT
+from model import GPT, resolve_layer_cfg
 
 
 def make_cfg(**overrides):
@@ -260,6 +260,52 @@ def test_s4_is_causal():
     # same causality property as attention: changing the last token must
     # not move any earlier position's logits.
     cfg = make_cfg(attn_type="s4", d_state=4)
+    model = GPT(cfg)
+    model.eval()
+    idx = torch.randint(0, cfg["vocab_size"], (1, cfg["block_size"]))
+    with torch.no_grad():
+        logits_full, _ = model(idx)
+        idx_truncated = idx.clone()
+        idx_truncated[:, -1] = (idx_truncated[:, -1] + 1) % cfg["vocab_size"]
+        logits_changed, _ = model(idx_truncated)
+    assert torch.allclose(logits_full[:, :-1], logits_changed[:, :-1], atol=1e-5)
+
+
+def test_layer_recipe_backward_compatible():
+    # Without layer_recipe, every layer must resolve to cfg unchanged --
+    # the no-op guard that keeps all six existing single-mixer-type configs
+    # behaving exactly as before this seam was added.
+    cfg = make_cfg(attn_type="s4", d_state=4)
+    for i in range(cfg["n_layer"]):
+        assert resolve_layer_cfg(cfg, i) is cfg
+
+
+def test_hybrid_forward_shape():
+    cfg = make_cfg(
+        n_layer=3,
+        layer_recipe=["mamba", "full", "s4"],
+        d_state=4,
+        expand=2,
+        d_conv=3,
+    )
+    model = GPT(cfg)
+    idx = torch.randint(0, cfg["vocab_size"], (2, cfg["block_size"]))
+    logits, loss = model(idx)
+    assert logits.shape == (2, cfg["block_size"], cfg["vocab_size"])
+    assert loss is None
+
+
+def test_hybrid_is_causal():
+    # Same causality check applied to every other mixer, run across a mixed
+    # stack -- a regression guard that interleaving different mixer types
+    # doesn't break causality end to end.
+    cfg = make_cfg(
+        n_layer=3,
+        layer_recipe=["mamba", "full", "s4"],
+        d_state=4,
+        expand=2,
+        d_conv=3,
+    )
     model = GPT(cfg)
     model.eval()
     idx = torch.randint(0, cfg["vocab_size"], (1, cfg["block_size"]))

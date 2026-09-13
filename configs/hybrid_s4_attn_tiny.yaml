@@ -1,0 +1,34 @@
+# Same interleaving idea as configs/hybrid_mamba_attn_tiny.yaml, but with
+# S4D (cheap, closed-form FFT conv) in place of Mamba's unfused scan. This
+# isolates "does hybridizing with attention help at all" from "Mamba's own
+# sequential-scan latency", since S4D was already the cheapest/fastest
+# mixer measured in the six-way comparison.
+
+run_name: hybrid_s4_attn_tiny
+
+data_path: data/tinyshakespeare.txt
+val_fraction: 0.1
+
+# model
+attn_type: hybrid
+layer_recipe: [s4, s4, s4, full]
+d_state: 16
+n_layer: 4
+n_head: 4
+n_embd: 128
+block_size: 128
+dropout: 0.1
+bias: false
+# vocab_size is set at runtime from the tokenizer
+
+# training
+batch_size: 32
+max_iters: 2000
+eval_interval: 200
+eval_iters: 50
+learning_rate: 0.001
+weight_decay: 0.01
+grad_clip: 1.0
+seed: 1337
+
+out_dir: experiments/hybrid_s4_attn_tiny

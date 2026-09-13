@@ -392,6 +392,22 @@ class Block(nn.Module):
         return x
 
 
+def resolve_layer_cfg(cfg, i):
+    """Effective per-layer cfg. cfg["layer_recipe"][i], if present, overrides
+    attn_type (and any per-layer hyperparams) for layer i -- this is the seam
+    for hybrid architectures (Jamba/Griffin/Zamba-style interleaving of
+    different mixer types across depth). Without layer_recipe every layer
+    resolves to cfg unchanged: today's single-mixer-type behavior, exactly
+    as before.
+    """
+    if "layer_recipe" not in cfg:
+        return cfg
+    spec = cfg["layer_recipe"][i]
+    if isinstance(spec, str):
+        spec = {"attn_type": spec}
+    return {**cfg, **spec}
+
+
 class GPT(nn.Module):
     def __init__(self, cfg):
         super().__init__()
@@ -401,7 +417,9 @@ class GPT(nn.Module):
         self.tok_emb = nn.Embedding(cfg["vocab_size"], cfg["n_embd"])
         self.pos_emb = nn.Embedding(cfg["block_size"], cfg["n_embd"])
         self.drop = nn.Dropout(cfg["dropout"])
-        self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg["n_layer"])])
+        self.blocks = nn.ModuleList(
+            [Block(resolve_layer_cfg(cfg, i)) for i in range(cfg["n_layer"])]
+        )
         self.ln_f = nn.LayerNorm(cfg["n_embd"])
         self.head = nn.Linear(cfg["n_embd"], cfg["vocab_size"], bias=False)
 

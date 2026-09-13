@@ -1,0 +1,38 @@
+# Stage-2 extension: Jamba/Griffin/Zamba-style hybrid -- mostly Mamba layers
+# with a single full-attention layer to restore the precise/global "look
+# back and retrieve anything" capacity pure SSMs are known to lack.
+# attn_type: hybrid is a label only (see resolve_layer_cfg in model.py);
+# each layer's *real* mixer comes from layer_recipe below. Attention placed
+# last for this first cut -- not claimed optimal, layer position is itself
+# worth sweeping later.
+
+run_name: hybrid_mamba_attn_tiny
+
+data_path: data/tinyshakespeare.txt
+val_fraction: 0.1
+
+# model
+attn_type: hybrid
+layer_recipe: [mamba, mamba, mamba, full]
+d_state: 16
+expand: 2
+d_conv: 4
+n_layer: 4
+n_head: 4
+n_embd: 128
+block_size: 128
+dropout: 0.1
+bias: false
+# vocab_size is set at runtime from the tokenizer
+
+# training
+batch_size: 32
+max_iters: 2000
+eval_interval: 200
+eval_iters: 50
+learning_rate: 0.001
+weight_decay: 0.01
+grad_clip: 1.0
+seed: 1337
+
+out_dir: experiments/hybrid_mamba_attn_tiny

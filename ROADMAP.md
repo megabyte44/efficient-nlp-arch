@@ -88,3 +88,31 @@ Only after an algorithmic variant is working and measured:
   "only after an algorithmic variant is measured" -- the trick is real,
   but only past a measured crossover length; a fused kernel (Triton/CUDA)
   would push that crossover much earlier.
+- 2026-09-13: all six Stage 1/2 variants (full, local x2, dilated, s4,
+  mamba) trained for real (2000 iters, tinyshakespeare, RTX 2050 CUDA --
+  not just benchmarked at random init) and compared on trained quality for
+  the first time. Headline: s4 strictly dominates the full-attention
+  baseline (fewer params, fewer FLOPs, lower val_loss); local(w=8) beats
+  both local(w=32) and full attention on quality, not just compute (char-
+  level next-token prediction leans on very recent context); dilated
+  matches local(w=8)'s FLOPs/token exactly but loses badly on quality
+  (2.1x worse ppl) -- contiguous local context beats sparse-but-wider
+  context here; mamba has the best raw quality of the six but at ~71x the
+  measured latency of any attention variant (unfused sequential scan, not
+  the algorithm). Full comparison: `experiments/summary.{json,md}` and the
+  published artifact (see chat).
+- 2026-09-13: Stage 2 extension -- hybrid (interleaved attention + SSM)
+  architectures added via a new `layer_recipe` seam (`resolve_layer_cfg` in
+  `src/model.py`), motivated by the Jamba/Griffin/Zamba line of research
+  the user pointed at. Two recipes trained: `[mamba, mamba, mamba, full]`
+  and `[s4, s4, s4, full]` (attention as the last layer, position not yet
+  swept). Result: **hybrid-mamba beats pure mamba on every axis at once**
+  -- fewer params (1.13M vs 1.25M), fewer FLOPs/token (2.36M vs 2.52M),
+  and better val_loss (1.5444 vs 1.5562, ppl 4.69 vs 4.74) -- now the best
+  of all eight variants tested, and 25% faster than pure mamba (92.4ms vs
+  121.9ms/forward) though still dominated by the three remaining
+  sequential-scan layers. hybrid-s4 similarly edges out pure s4 (ppl 4.97
+  vs 5.02) for a small compute cost, at S4D-like speed (5.3ms/forward) --
+  the practical pick if latency matters more than the last bit of quality.
+  Confirms the hybrid hypothesis on this toy setup. Not yet explored:
+  attention-layer position within the recipe, and the interleaving ratio.

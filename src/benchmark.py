@@ -17,7 +17,7 @@ import torch
 from tabulate import tabulate
 
 from data import load_dataset
-from model import GPT
+from model import GPT, resolve_layer_cfg
 from utils import get_device, load_config
 
 
@@ -38,6 +38,21 @@ def attention_span(cfg):
     return cfg["block_size"]
 
 
+def _mixer_flops_term(cfg):
+    """One layer's mixer FLOPs term (the 12*H*Q*T attention term, or its
+    non-attention equivalent). Factored out of analytical_flops_per_token_forward
+    so hybrid architectures (see resolve_layer_cfg) can sum a different term
+    per layer instead of assuming every layer is the same mixer.
+    """
+    if cfg["attn_type"] in ("s4", "mamba"):
+        # No qkv/attention term at all: a diagonal state-space mixer costs
+        # O(n_embd * d_state) per token, independent of T -- that's the
+        # whole point of the trick (vs attention's O(T) per-token term).
+        return 12 * cfg["n_embd"] * cfg["d_state"]
+    H, Q, T = cfg["n_head"], cfg["n_embd"] // cfg["n_head"], attention_span(cfg)
+    return 12 * H * Q * T
+
+
 def analytical_flops_per_token_forward(cfg, n_params):
     """Approximate forward-pass FLOPs/token.
 
@@ -49,16 +64,15 @@ def analytical_flops_per_token_forward(cfg, n_params):
     architecture) are meaningful. T is replaced by the effective attention
     span (see `attention_span`) so variants that restrict attention (e.g.
     local/windowed) show the corresponding drop in this term.
+
+    Summed per-layer (via resolve_layer_cfg) rather than one term times L,
+    so a hybrid recipe (different attn_type per layer) is estimated
+    correctly -- for every non-hybrid config every layer resolves to the
+    same cfg, so this sum is exactly the old L * term.
     """
-    L = cfg["n_layer"]
-    if cfg["attn_type"] in ("s4", "mamba"):
-        # No qkv/attention term at all: a diagonal state-space mixer costs
-        # O(n_embd * d_state) per token, independent of T -- that's the
-        # whole point of the trick (vs attention's O(T) per-token term).
-        mixer_term = 12 * L * cfg["n_embd"] * cfg["d_state"]
-    else:
-        H, Q, T = cfg["n_head"], cfg["n_embd"] // cfg["n_head"], attention_span(cfg)
-        mixer_term = 12 * L * H * Q * T
+    mixer_term = sum(
+        _mixer_flops_term(resolve_layer_cfg(cfg, i)) for i in range(cfg["n_layer"])
+    )
     total_fwd_bwd = 6 * n_params + mixer_term
     return total_fwd_bwd / 3
 
@@ -135,6 +149,7 @@ def run_benchmark(cfg, checkpoint_path=None):
     results = {
         "run_name": cfg.get("run_name", "unnamed"),
         "attn_type": cfg["attn_type"],
+        "layer_recipe": cfg.get("layer_recipe"),
         "params_total": n_params_total,
         "params_non_embedding": n_params_non_emb,
         "flops_per_token_forward": analytical_flops_per_token_forward(cfg, n_params_non_emb),
