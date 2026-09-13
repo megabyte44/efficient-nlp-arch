@@ -1,0 +1,21 @@
+{
+  "run_name": "hybrid_mamba_attn_tiny_chunked",
+  "attn_type": "hybrid",
+  "layer_recipe": [
+    "mamba",
+    "mamba",
+    "mamba",
+    "full"
+  ],
+  "scan_type": "chunked",
+  "params_total": 1149824,
+  "params_non_embedding": 1133440,
+  "flops_per_token_forward": 2356992.0,
+  "val_loss": 1.5668011903762817,
+  "val_perplexity": 4.791297206807288,
+  "ms_per_forward": 27.84727359999124,
+  "ms_per_token": 0.027194603124991445,
+  "tokens_per_sec": 36772.001981562826,
+  "peak_memory_mb": 50.192896,
+  "source": "torch.cuda.max_memory_allocated"
+}
