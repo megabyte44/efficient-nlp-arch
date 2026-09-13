@@ -44,7 +44,7 @@ def _mixer_flops_term(cfg):
     so hybrid architectures (see resolve_layer_cfg) can sum a different term
     per layer instead of assuming every layer is the same mixer.
     """
-    if cfg["attn_type"] in ("s4", "mamba"):
+    if cfg["attn_type"] in ("s4", "mamba", "mamba2"):
         # No qkv/attention term at all: a diagonal state-space mixer costs
         # O(n_embd * d_state) per token, independent of T -- that's the
         # whole point of the trick (vs attention's O(T) per-token term).
@@ -150,6 +150,8 @@ def run_benchmark(cfg, checkpoint_path=None):
         "run_name": cfg.get("run_name", "unnamed"),
         "attn_type": cfg["attn_type"],
         "layer_recipe": cfg.get("layer_recipe"),
+        "scan_type": cfg.get("scan_type"),
+        "mamba_heads": cfg.get("mamba_heads"),
         "params_total": n_params_total,
         "params_non_embedding": n_params_non_emb,
         "flops_per_token_forward": analytical_flops_per_token_forward(cfg, n_params_non_emb),

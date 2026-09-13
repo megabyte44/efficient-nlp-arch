@@ -1,0 +1,42 @@
+# Hybrid recipe using Mamba2Mixer instead of MambaMixer for the SSM
+# layers, mirroring hybrid_mamba_attn_tiny.yaml's [mamba, mamba, mamba,
+# full] shape -- the current best config in experiments/summary.md (ppl
+# 4.69). Phase 4 of the Mamba-scan investigation (see ROADMAP.md):
+# checks whether Mamba-2/SSD's scalar-per-head A costs anything in
+# quality when substituted into the winning hybrid recipe, while getting
+# chunking's speed benefit (no blowup, unlike the Mamba-1/S6 hybrid's
+# scan_type: chunked variant) essentially for free.
+
+run_name: hybrid_mamba2_attn_tiny_chunked
+
+data_path: data/tinyshakespeare.txt
+val_fraction: 0.1
+
+# model
+attn_type: hybrid
+layer_recipe: [mamba2, mamba2, mamba2, full]
+scan_type: chunked
+chunk_size: 64
+d_state: 16
+expand: 2
+d_conv: 4
+mamba_heads: 8
+n_layer: 4
+n_head: 4
+n_embd: 128
+block_size: 128
+dropout: 0.1
+bias: false
+# vocab_size is set at runtime from the tokenizer
+
+# training
+batch_size: 32
+max_iters: 2000
+eval_interval: 200
+eval_iters: 50
+learning_rate: 0.001
+weight_decay: 0.01
+grad_clip: 1.0
+seed: 1337
+
+out_dir: experiments/hybrid_mamba2_attn_tiny_chunked

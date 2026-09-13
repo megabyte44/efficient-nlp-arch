@@ -1,0 +1,42 @@
+# Phase 4 of the Mamba-scan investigation (see ROADMAP.md): same
+# shape/training setup as configs/mamba_tiny.yaml, swapping MambaMixer's
+# Mamba-1/S6 (A a full (d_inner, d_state) diagonal) for Mamba2Mixer's
+# Mamba-2/SSD-style A (a single scalar per head, mamba_heads=8 heads of
+# headdim=32 each). The scan-only benchmark already showed this removes
+# the chunked-scan blowup Mamba-1/S6 hits; this config is for the question
+# that benchmark can't answer -- does the reduced per-channel selectivity
+# cost anything in trained quality vs mamba_tiny? Non-embedding params are
+# NOT matched (971,152 here vs mamba_tiny's 1,245,568 at mamba_heads=4;
+# 999,936 even at mamba_heads=32) -- x_proj shrinks a lot when delta is
+# per-head instead of per-channel. Reported alongside quality, not hidden.
+
+run_name: mamba2_tiny
+
+data_path: data/tinyshakespeare.txt
+val_fraction: 0.1
+
+# model
+attn_type: mamba2
+d_state: 16
+expand: 2
+d_conv: 4
+mamba_heads: 8
+n_layer: 4
+n_head: 4
+n_embd: 128
+block_size: 128
+dropout: 0.1
+bias: false
+# vocab_size is set at runtime from the tokenizer
+
+# training
+batch_size: 32
+max_iters: 2000
+eval_interval: 200
+eval_iters: 50
+learning_rate: 0.001
+weight_decay: 0.01
+grad_clip: 1.0
+seed: 1337
+
+out_dir: experiments/mamba2_tiny

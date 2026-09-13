@@ -450,6 +450,80 @@ class MambaMixer(nn.Module):
         return self.dropout(self.out_proj(y))
 
 
+class Mamba2Mixer(nn.Module):
+    """Mamba-2/SSD-style selective state-space mixer: the same surrounding
+    block shape as MambaMixer (input projection, causal depthwise conv,
+    SiLU gating, B/C shared across channels) but `A` is a single learned
+    scalar per head (`mamba_heads` heads, each `headdim = d_inner /
+    mamba_heads` channels wide) instead of MambaMixer's full (d_inner,
+    d_state) diagonal -- one decay rate per head, not per (channel, state).
+
+    This is Phase 4 of the Mamba-scan investigation (see ROADMAP.md) as an
+    actual trainable variant. The scan-only benchmark (`scripts/
+    bench_mamba2_scan.py`) already showed this restriction removes the
+    O(chunk_size^2 * d_inner * d_state) blowup MambaMixer's generalized
+    chunked scan hits, turning chunking into a clean, hardware-robust
+    speedup instead of a narrow one. What that benchmark can't answer is
+    the quality cost of the restriction itself (fewer independent decay
+    rates) -- that's what training this variant and comparing perplexity
+    against MambaMixer at a matched parameter budget is for. Not claimed
+    better or worse going in.
+
+    `scan_type: sequential | chunked` (default sequential) dispatches to
+    `mamba2_sequential_scan` / `mamba2_chunked_scan`, mirroring MambaMixer.
+    """
+
+    def __init__(self, cfg):
+        super().__init__()
+        n_embd = cfg["n_embd"]
+        d_state = cfg["d_state"]
+        d_inner = cfg["expand"] * n_embd
+        d_conv = cfg["d_conv"]
+        mamba_heads = cfg["mamba_heads"]
+        assert d_inner % mamba_heads == 0, "d_inner must be divisible by mamba_heads"
+        self.d_inner = d_inner
+        self.d_state = d_state
+        self.d_conv = d_conv
+        self.mamba_heads = mamba_heads
+        self.scan_type = cfg.get("scan_type", "sequential")
+        self.chunk_size = cfg.get("chunk_size", 32)
+
+        self.in_proj = nn.Linear(n_embd, 2 * d_inner, bias=cfg["bias"])
+        self.conv1d = nn.Conv1d(d_inner, d_inner, kernel_size=d_conv, groups=d_inner, bias=True)
+        self.x_proj = nn.Linear(d_inner, mamba_heads + 2 * d_state, bias=False)
+
+        A_log = torch.log(torch.arange(1, mamba_heads + 1).float())
+        self.A_log = nn.Parameter(A_log)
+        self.D = nn.Parameter(torch.ones(d_inner))
+
+        self.out_proj = nn.Linear(d_inner, n_embd, bias=cfg["bias"])
+        self.dropout = nn.Dropout(cfg["dropout"])
+
+    def forward(self, x):
+        x_in, z = self.in_proj(x).chunk(2, dim=-1)  # each (B, T, d_inner)
+
+        x_in = x_in.transpose(1, 2)  # (B, d_inner, T)
+        x_in = F.pad(x_in, (self.d_conv - 1, 0))
+        x_in = F.silu(self.conv1d(x_in))
+        x_in = x_in.transpose(1, 2)  # (B, T, d_inner)
+
+        delta, B_seq, C_seq = torch.split(
+            self.x_proj(x_in), [self.mamba_heads, self.d_state, self.d_state], dim=-1
+        )
+        delta = F.softplus(delta)  # (B, T, mamba_heads)
+        A = -torch.exp(self.A_log)  # (mamba_heads,)
+
+        if self.scan_type == "chunked":
+            y = mamba2_chunked_scan(delta, A, B_seq, x_in, C_seq, self.D, self.mamba_heads, self.chunk_size)
+        elif self.scan_type == "sequential":
+            y = mamba2_sequential_scan(delta, A, B_seq, x_in, C_seq, self.D, self.mamba_heads)
+        else:
+            raise ValueError(f"scan_type={self.scan_type!r} not implemented")
+
+        y = y * F.silu(z)
+        return self.dropout(self.out_proj(y))
+
+
 def build_attention(cfg):
     if cfg["attn_type"] == "full":
         return CausalSelfAttention(cfg)
@@ -461,6 +535,8 @@ def build_attention(cfg):
         return S4DMixer(cfg)
     if cfg["attn_type"] == "mamba":
         return MambaMixer(cfg)
+    if cfg["attn_type"] == "mamba2":
+        return Mamba2Mixer(cfg)
     raise NotImplementedError(
         f"attn_type={cfg['attn_type']!r} not implemented yet — Stage 2 work"
     )

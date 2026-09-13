@@ -1,0 +1,41 @@
+# Same as mamba2_tiny.yaml but scan_type: chunked, chunk_size: 64 -- the
+# best point found by scripts/bench_mamba2_scan.py (21x/28x fwd/bwd speedup
+# over sequential at this exact shape, with no blowup). Quality should be
+# identical to mamba2_tiny.yaml (chunked vs sequential is the same math,
+# verified in tests/test_model.py) -- this config exists so a single fast
+# training run gives both the real trained quality number and a real
+# same-hardware speed number, without needing a separate slow sequential
+# training run for quality (which chunked already reproduces).
+
+run_name: mamba2_tiny_chunked
+
+data_path: data/tinyshakespeare.txt
+val_fraction: 0.1
+
+# model
+attn_type: mamba2
+scan_type: chunked
+chunk_size: 64
+d_state: 16
+expand: 2
+d_conv: 4
+mamba_heads: 8
+n_layer: 4
+n_head: 4
+n_embd: 128
+block_size: 128
+dropout: 0.1
+bias: false
+# vocab_size is set at runtime from the tokenizer
+
+# training
+batch_size: 32
+max_iters: 2000
+eval_interval: 200
+eval_iters: 50
+learning_rate: 0.001
+weight_decay: 0.01
+grad_clip: 1.0
+seed: 1337
+
+out_dir: experiments/mamba2_tiny_chunked

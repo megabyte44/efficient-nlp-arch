@@ -1,0 +1,17 @@
+{
+  "run_name": "mamba2_tiny_chunked",
+  "attn_type": "mamba2",
+  "layer_recipe": null,
+  "scan_type": "chunked",
+  "mamba_heads": 8,
+  "params_total": 991648,
+  "params_non_embedding": 975264,
+  "flops_per_token_forward": 1983296.0,
+  "val_loss": 1.5470216274261475,
+  "val_perplexity": 4.697458545312236,
+  "ms_per_forward": 51.57147999998415,
+  "ms_per_token": 0.05036277343748452,
+  "tokens_per_sec": 19855.935877743177,
+  "peak_memory_mb": 74.379776,
+  "source": "torch.cuda.max_memory_allocated"
+}

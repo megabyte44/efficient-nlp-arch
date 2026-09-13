@@ -9,7 +9,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import torch
 import torch.nn.functional as F
 
-from model import GPT, resolve_layer_cfg, mamba2_sequential_scan, mamba2_chunked_scan
+from model import (
+    GPT,
+    resolve_layer_cfg,
+    mamba2_sequential_scan,
+    mamba2_chunked_scan,
+)
 
 
 def make_cfg(**overrides):
@@ -388,3 +393,49 @@ def test_mamba2_chunked_scan_gradients_match_sequential():
         assert torch.allclose(grads_seq[name], grads_chunked[name], atol=atol), (
             f"gradient mismatch for {name}: max abs diff={max_diff}"
         )
+
+
+# --- Mamba2Mixer: the scan functions above wired into an actual trainable
+# nn.Module (attn_type="mamba2"), so Phase 4's restriction can be trained
+# and compared on quality, not just benchmarked in isolation. ---
+
+
+def test_mamba2_forward_shape():
+    cfg = make_cfg(attn_type="mamba2", d_state=4, expand=2, d_conv=3, mamba_heads=2)
+    model = GPT(cfg)
+    idx = torch.randint(0, cfg["vocab_size"], (2, cfg["block_size"]))
+    logits, loss = model(idx)
+    assert logits.shape == (2, cfg["block_size"], cfg["vocab_size"])
+    assert loss is None
+
+
+def test_mamba2_is_causal():
+    cfg = make_cfg(attn_type="mamba2", d_state=4, expand=2, d_conv=3, mamba_heads=2)
+    model = GPT(cfg)
+    model.eval()
+    idx = torch.randint(0, cfg["vocab_size"], (1, cfg["block_size"]))
+    with torch.no_grad():
+        logits_full, _ = model(idx)
+        idx_truncated = idx.clone()
+        idx_truncated[:, -1] = (idx_truncated[:, -1] + 1) % cfg["vocab_size"]
+        logits_changed, _ = model(idx_truncated)
+    assert torch.allclose(logits_full[:, :-1], logits_changed[:, :-1], atol=1e-5)
+
+
+def test_mamba2_chunked_matches_sequential_end_to_end():
+    # Same equivalence check as test_chunked_full_attention_matches_non_chunked,
+    # applied to the full Mamba2Mixer (not just the standalone scan
+    # functions): toggling scan_type post-construction must not change the
+    # model's output.
+    torch.manual_seed(0)
+    cfg = make_cfg(attn_type="mamba2", d_state=4, expand=2, d_conv=3, mamba_heads=2, n_layer=1)
+    model = GPT(cfg)
+    model.eval()
+    idx = torch.randint(0, cfg["vocab_size"], (2, cfg["block_size"]))
+    with torch.no_grad():
+        logits_seq, _ = model(idx)
+        for block in model.blocks:
+            block.attn.scan_type = "chunked"
+            block.attn.chunk_size = 3
+        logits_chunked, _ = model(idx)
+    assert torch.allclose(logits_seq, logits_chunked, atol=1e-4)

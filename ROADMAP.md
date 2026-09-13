@@ -156,4 +156,51 @@ Only after an algorithmic variant is working and measured:
   own sake), this needs a real trained comparison (Mamba-1/S6-style
   MambaMixer vs a Mamba-2-style equivalent, same param budget) before
   concluding the restriction is worth adopting, not just that it's fast.
-  Not yet built -- these functions aren't wired into a trainable mixer.
+- 2026-09-13: Phase 4 continued -- built `Mamba2Mixer` (`attn_type:
+  mamba2`, `src/model.py`), wiring `mamba2_sequential_scan`/
+  `mamba2_chunked_scan` into an actual trainable module, and trained two
+  configs for real (2000 iters, tinyshakespeare, same RTX 2050, `scan_type:
+  chunked`, `chunk_size: 64` -- quality is identical to `scan_type:
+  sequential` by construction, so one fast trained run gives both the real
+  quality number and a real speed number without a slow redundant
+  sequential training run). Both trained cleanly in ~6-7 minutes locally
+  with no slowdown or OOM -- itself a confirmation of Phase 4's hardware-
+  robustness finding under real training conditions, not just the isolated
+  scan benchmark.
+
+  `mamba2_tiny` (pure, non-hybrid, `mamba_heads=8`): **val_loss 1.5507,
+  ppl 4.71** (benchmark eval: 1.5470/4.6975) -- essentially matching the
+  previous best config (`hybrid_mamba_attn_tiny`, ppl 4.69) while using
+  **22% fewer non-embedding params** (975,264 vs 1,245,568) and **fewer
+  FLOPs/token than every mamba-family config tried so far** (1,983,296 vs
+  hybrid_mamba_attn_tiny's 2,356,992 and mamba_tiny's 2,523,904), at
+  51.6ms/forward -- far from attention/S4-family speeds, but roughly half
+  of mamba_tiny's original 121.9ms and a third of hybrid_mamba_attn_tiny's
+  92.4ms. Non-hybrid and simpler than the winning recipe, yet competitive
+  with it: the strongest evidence yet that the Mamba-1/S6 diagonal `A`'s
+  extra per-state selectivity wasn't earning its FLOPs on this task.
+
+  `hybrid_mamba2_attn_tiny` (`[mamba2, mamba2, mamba2, full]`, same
+  recipe shape as the Mamba-1 hybrid): val_loss 1.5678, ppl 4.80 --
+  **worse** than pure `mamba2_tiny`, the opposite of what hybridizing did
+  for Mamba-1 (there, hybrid beat pure mamba on every axis). Fewer params
+  (930,712) and FLOPs (1,951,536) than pure mamba2, and by far the fastest
+  mamba-family/hybrid config measured yet (22.6ms/forward -- getting close
+  to attention-family latency) -- so it's a real pick if speed matters
+  most, but not a quality win here. Not investigated why the attention
+  layer helps the Mamba-1 hybrid but hurts the Mamba-2 one; a reasonable
+  guess is that Mamba-2's coarser per-head decay already covers some of
+  what Mamba-1 needed the attention layer to compensate for, so the extra
+  layer is now pure redundancy/capacity-dilution rather than filling a
+  real gap -- untested.
+
+  Net for the Pareto objective: **`mamba2_tiny` is arguably the new best
+  point** -- matches the previous best quality at meaningfully lower
+  params/FLOPs, non-hybrid (simpler), and hardware-robust when chunked.
+  Full numbers: `experiments/mamba2_tiny_chunked/benchmark.json`,
+  `experiments/hybrid_mamba2_attn_tiny_chunked/benchmark.json`. Not yet
+  folded into `experiments/summary.{json,md}` (that's the full 8+2-config
+  regeneration, deferred pending review) or compared at a matched param
+  budget (this comparison is at matched *hyperparameters*, not matched
+  params -- mamba2's params fell out lower as a side effect of the
+  architecture, not a deliberate control).
