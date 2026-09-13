@@ -1,0 +1,41 @@
+# Phase 3 of the Mamba-scan diagnostic experiment (see ROADMAP.md): same as
+# hybrid_mamba_attn_tiny.yaml, but scan_type: chunked / chunk_size: 8 for
+# the three mamba layers (resolve_layer_cfg merges these top-level keys
+# into every layer_recipe entry, so the "full" layer just ignores them).
+# This is the (chunk_size, model width) point Phase 2's scan-only benchmark
+# found to be a real win at d_inner=256 -- validating it end to end with
+# real training on the current best config from the hybrid-vs-non-hybrid
+# comparison.
+
+run_name: hybrid_mamba_attn_tiny_chunked
+
+data_path: data/tinyshakespeare.txt
+val_fraction: 0.1
+
+# model
+attn_type: hybrid
+layer_recipe: [mamba, mamba, mamba, full]
+scan_type: chunked
+chunk_size: 8
+d_state: 16
+expand: 2
+d_conv: 4
+n_layer: 4
+n_head: 4
+n_embd: 128
+block_size: 128
+dropout: 0.1
+bias: false
+# vocab_size is set at runtime from the tokenizer
+
+# training
+batch_size: 32
+max_iters: 2000
+eval_interval: 200
+eval_iters: 50
+learning_rate: 0.001
+weight_decay: 0.01
+grad_clip: 1.0
+seed: 1337
+
+out_dir: experiments/hybrid_mamba_attn_tiny_chunked

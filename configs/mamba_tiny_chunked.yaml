@@ -1,0 +1,39 @@
+# Phase 3 of the Mamba-scan diagnostic experiment (see ROADMAP.md): same as
+# mamba_tiny.yaml, but scan_type: chunked with chunk_size=8 -- the one
+# (chunk_size, model width) combination Phase 2's scan-only benchmark found
+# to be a real win (17.9ms vs 27.0ms fwd, 37.9ms vs 98.0ms bwd) at this
+# model's actual width (d_inner = expand * n_embd = 256). Not a general
+# solution -- see MambaMixer's docstring -- just the one narrow point worth
+# validating end to end with real training.
+
+run_name: mamba_tiny_chunked
+
+data_path: data/tinyshakespeare.txt
+val_fraction: 0.1
+
+# model
+attn_type: mamba
+scan_type: chunked
+chunk_size: 8
+d_state: 16
+expand: 2
+d_conv: 4
+n_layer: 4
+n_head: 4
+n_embd: 128
+block_size: 128
+dropout: 0.1
+bias: false
+# vocab_size is set at runtime from the tokenizer
+
+# training
+batch_size: 32
+max_iters: 2000
+eval_interval: 200
+eval_iters: 50
+learning_rate: 0.001
+weight_decay: 0.01
+grad_clip: 1.0
+seed: 1337
+
+out_dir: experiments/mamba_tiny_chunked

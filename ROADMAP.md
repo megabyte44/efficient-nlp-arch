@@ -116,3 +116,38 @@ Only after an algorithmic variant is working and measured:
   the practical pick if latency matters more than the last bit of quality.
   Confirms the hybrid hypothesis on this toy setup. Not yet explored:
   attention-layer position within the recipe, and the interleaving ratio.
+- 2026-09-13: Mamba scan diagnostic, Phases 1-2 of a scoped experiment
+  (`mamba_sequential_scan`/`mamba_chunked_scan` in `src/model.py`,
+  `scripts/bench_mamba_scan.py`) -- checking whether mamba's ~9x-latency
+  cost (above) is the Python loop's fault or inherent to the recurrence.
+  Phase 1: derived a chunked/parallel scan of the exact same S6 recurrence
+  (a numerically-stable cumulative-decay-difference trick, adapted from the
+  official Mamba-2/SSD reference's `segsum` but keeping our `A`'s full
+  `(d_inner, d_state)` diagonal rather than Mamba-2's per-head-scalar
+  restriction) and verified it matches the sequential reference within
+  1e-4 across sequence lengths, chunk sizes, gradients, and after real
+  training steps (`tests/test_model.py`). Phase 2: benchmarked the two
+  scans in isolation (not the full model) at three sizes. Result: **a
+  narrow, real win, not a general one**. At mamba_tiny's actual shape
+  (d_inner=256) with the smallest chunk size tested (8), chunked beats
+  sequential on both forward (17.9ms vs 27.0ms) and backward (37.9ms vs
+  98.0ms) -- the loop really is costing something at production scale. But
+  it doesn't generalize: larger chunk sizes get progressively worse
+  (chunk=64: 138.6ms fwd / 1543ms bwd, both worse than sequential) because
+  this adaptation's intra-chunk decay tensor scales as
+  `O(chunk_size^2 * d_inner * d_state)` -- exactly the cost Mamba-2/SSD's
+  per-head-scalar `A` restriction exists to avoid. Doubling model width
+  (d_inner=512) breaks even chunk_size=8: forward stays roughly flat
+  (34.5ms vs 26.4ms) but backward regresses badly (810ms vs 105ms); the
+  chunk=16/32 points at that width were wildly non-monotonic (1735ms,
+  4226ms fwd) and look like a measurement artifact (thermal/allocator
+  noise from a prior heavy run) rather than a clean trend -- worth a
+  rerun in a fresh process before trusting those two numbers specifically,
+  though the qualitative scaling problem holds regardless. FLOPs are
+  unchanged either way (same math, fewer loop iterations), so this is a
+  latency finding, not a quality/compute-frontier improvement by itself.
+  Sharpens the Phase 4 question from "make our chunked scan faster" to:
+  how does Mamba-2 get chunked-scan parallelism without paying this
+  `O(chunk^2 * width * state)` cost, and does that require its scalar-A
+  restriction or something less restrictive? Full numbers:
+  `experiments/mamba_scan_bench.{json,md}`.

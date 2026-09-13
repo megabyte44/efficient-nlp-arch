@@ -276,6 +276,110 @@ class S4DMixer(nn.Module):
         return self.dropout(self.proj(y))
 
 
+def mamba_sequential_scan(delta, A, B_seq, x_in, C_seq, D):
+    """Reference implementation of the S6 recurrence:
+
+        state_t = exp(delta_t * A) (*) state_{t-1} + delta_t * B_t * x_t
+        y_t     = C_t . state_t + D * x_t
+
+    computed one timestep at a time -- O(T) sequential Python-loop steps,
+    no parallelism across time. This is exactly `MambaMixer.forward`'s
+    original loop body, pulled out so it can serve as the ground-truth
+    reference `mamba_chunked_scan` (below) is checked against.
+
+    Shapes: delta (B,T,d_inner), A (d_inner,d_state), B_seq/C_seq
+    (B,T,d_state), x_in (B,T,d_inner), D (d_inner,). Returns (B,T,d_inner).
+    """
+    Bsz, T, d_inner = delta.shape
+    d_state = A.shape[1]
+    state = delta.new_zeros(Bsz, d_inner, d_state)
+    ys = []
+    for t in range(T):
+        delta_t = delta[:, t]  # (B, d_inner)
+        A_bar = torch.exp(delta_t.unsqueeze(-1) * A.unsqueeze(0))  # (B, d_inner, d_state)
+        deltaB_x = (
+            delta_t.unsqueeze(-1) * B_seq[:, t].unsqueeze(1) * x_in[:, t].unsqueeze(-1)
+        )  # (B, d_inner, d_state)
+        state = A_bar * state + deltaB_x
+        y_t = torch.einsum("bdn,bn->bd", state, C_seq[:, t]) + D * x_in[:, t]
+        ys.append(y_t)
+    return torch.stack(ys, dim=1)  # (B, T, d_inner)
+
+
+def mamba_chunked_scan(delta, A, B_seq, x_in, C_seq, D, chunk_size):
+    """EXPERIMENTAL. Same recurrence as `mamba_sequential_scan`, computed by
+    splitting T into chunks of length `chunk_size` and, within a chunk,
+    replacing the per-step loop with a closed-form cumulative-decay
+    computation -- so the Python loop runs T/chunk_size times (one matmul
+    per chunk) instead of T times (one tiny op per timestep).
+
+    Not wired into `MambaMixer.forward` -- this is Phase 1 of a diagnostic
+    experiment (see ROADMAP.md) checking whether that Python loop, not the
+    Mamba recurrence itself, is what makes the mamba-family benchmark runs
+    30-70x slower than every other variant. Call directly (tests, the
+    scan-only benchmark) until correctness + speedup are both established.
+
+    Derivation: because A is time-invariant, delta depends only on the
+    channel (not the state dim), and log(exp(x)) = x, the log-decay from
+    chunk-local position k to position i (i >= k) factors as
+        logL_i - logL_k = A[d,n] * (Deltacum_i[d] - Deltacum_k[d])
+    where Deltacum is the within-chunk cumulative sum of delta. Computing
+    this *difference first, then exponentiating* (never dividing by a raw,
+    possibly-tiny cumulative product) keeps every exponent <= 0 for i >= k,
+    the same "subtract before exp" safety `chunked_causal_attention` uses
+    for its running max. This is the same numerically-stable technique the
+    official Mamba-2/SSD reference implementation (state-spaces/mamba,
+    `ssd_minimal_discrete`'s `segsum`) uses for its own chunking -- reused
+    here purely as a numerical method, not as an adoption of Mamba-2's
+    architecture: unlike Mamba-2, `A` here stays a full (d_inner, d_state)
+    diagonal (independent decay per channel *and* per state dim, not just
+    per head), so the intra-chunk decay tensor below carries an explicit
+    (d_inner, d_state) pair per (i, k) instead of Mamba-2's single
+    per-head scalar -- an O(chunk_size^2 * d_inner * d_state) tensor,
+    materialized once per chunk. That's the price of this being the
+    smallest correct adaptation of the idea to our more general A, not the
+    asymptotically optimal one (see ROADMAP.md Phase 4).
+    """
+    Bsz, T, d_inner = delta.shape
+    d_state = A.shape[1]
+    device = delta.device
+
+    y = delta.new_empty(Bsz, T, d_inner)
+    state = delta.new_zeros(Bsz, d_inner, d_state)
+
+    n_chunks = math.ceil(T / chunk_size)
+    for c in range(n_chunks):
+        t0, t1 = c * chunk_size, min((c + 1) * chunk_size, T)
+        L = t1 - t0
+
+        delta_c = delta[:, t0:t1]  # (B, L, d_inner)
+        B_c = B_seq[:, t0:t1]  # (B, L, d_state)
+        C_c = C_seq[:, t0:t1]  # (B, L, d_state)
+        x_c = x_in[:, t0:t1]  # (B, L, d_inner)
+
+        delta_cumsum = torch.cumsum(delta_c, dim=1)  # (B, L, d_inner)
+        logL = delta_cumsum.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0)  # (B, L, d_inner, d_state)
+
+        # Contribution carried in from the previous chunk's end-of-chunk state.
+        carry = torch.exp(logL) * state.unsqueeze(1)  # (B, L, d_inner, d_state)
+
+        # Intra-chunk contribution: decay[i, k] = exp(logL_i - logL_k), i >= k.
+        decay = logL.unsqueeze(2) - logL.unsqueeze(1)  # (B, L_i, L_k, d_inner, d_state)
+        causal_mask = torch.tril(torch.ones(L, L, dtype=torch.bool, device=device))
+        decay = decay.masked_fill(~causal_mask.view(1, L, L, 1, 1), float("-inf"))
+        decay = torch.exp(decay)  # 0 where masked out (future k)
+
+        deltaB_x = delta_c.unsqueeze(-1) * B_c.unsqueeze(2) * x_c.unsqueeze(-1)  # (B, L, d_inner, d_state)
+        intra = torch.einsum("blkdn,bkdn->bldn", decay, deltaB_x)  # (B, L, d_inner, d_state)
+
+        state_seq = carry + intra  # state_i for each i in this chunk
+        y[:, t0:t1] = torch.einsum("bldn,bln->bld", state_seq, C_c) + D.view(1, 1, -1) * x_c
+
+        state = state_seq[:, -1]  # end-of-chunk state, carried to the next chunk
+
+    return y
+
+
 class MambaMixer(nn.Module):
     """Selective state-space mixer (Mamba's S6), extending S4DMixer's
     diagonal SSM with input-dependent ("selective") Delta/B/C.
@@ -287,9 +391,19 @@ class MambaMixer(nn.Module):
     forget. That same input-dependence breaks S4D's FFT-convolution
     shortcut (the recurrence is no longer linear time-invariant), which is
     exactly why Mamba needed a hardware-aware parallel scan kernel instead.
-    Here it's a plain sequential scan over T -- correct, but O(T)
-    sequential steps with no parallelism across time; a real fused/parallel
-    scan is the natural Stage-4-style follow-up once this is measured.
+    `scan_type: sequential` (default) uses the plain per-timestep loop --
+    correct, but O(T) sequential steps with no parallelism across time.
+    `scan_type: chunked` uses `mamba_chunked_scan` instead. A diagnostic
+    experiment (see ROADMAP.md) found this is a narrow win, not a general
+    one: at this model's actual width (d_inner=256) with chunk_size=8 it
+    measurably beats the sequential scan on both forward and backward, but
+    larger chunk sizes or wider models make it *worse* -- the intra-chunk
+    decay tensor `mamba_chunked_scan` builds scales as
+    O(chunk_size^2 * d_inner * d_state), unlike official Mamba-2/SSD's
+    chunked algorithm, which avoids that blowup via a scalar-per-head A our
+    more general per-(channel, state) diagonal A doesn't have. Pick
+    `chunk_size` accordingly -- there is no size-independent default that's
+    safe.
 
     Also includes the surrounding block shape from the Mamba paper (input
     projection + causal depthwise conv + SiLU gating) since that structure
@@ -305,6 +419,8 @@ class MambaMixer(nn.Module):
         self.d_inner = d_inner
         self.d_state = d_state
         self.d_conv = d_conv
+        self.scan_type = cfg.get("scan_type", "sequential")
+        self.chunk_size = cfg.get("chunk_size", 32)
 
         self.in_proj = nn.Linear(n_embd, 2 * d_inner, bias=cfg["bias"])
         self.conv1d = nn.Conv1d(d_inner, d_inner, kernel_size=d_conv, groups=d_inner, bias=True)
@@ -318,7 +434,6 @@ class MambaMixer(nn.Module):
         self.dropout = nn.Dropout(cfg["dropout"])
 
     def forward(self, x):
-        B, T, _ = x.shape
         x_in, z = self.in_proj(x).chunk(2, dim=-1)  # each (B, T, d_inner)
 
         x_in = x_in.transpose(1, 2)  # (B, d_inner, T)
@@ -332,18 +447,12 @@ class MambaMixer(nn.Module):
         delta = F.softplus(delta)  # (B, T, d_inner)
         A = -torch.exp(self.A_log)  # (d_inner, d_state)
 
-        state = x.new_zeros(B, self.d_inner, self.d_state)
-        ys = []
-        for t in range(T):
-            delta_t = delta[:, t]  # (B, d_inner)
-            A_bar = torch.exp(delta_t.unsqueeze(-1) * A.unsqueeze(0))  # (B, d_inner, d_state)
-            deltaB_x = (
-                delta_t.unsqueeze(-1) * B_seq[:, t].unsqueeze(1) * x_in[:, t].unsqueeze(-1)
-            )  # (B, d_inner, d_state)
-            state = A_bar * state + deltaB_x
-            y_t = torch.einsum("bdn,bn->bd", state, C_seq[:, t]) + self.D * x_in[:, t]
-            ys.append(y_t)
-        y = torch.stack(ys, dim=1)  # (B, T, d_inner)
+        if self.scan_type == "chunked":
+            y = mamba_chunked_scan(delta, A, B_seq, x_in, C_seq, self.D, self.chunk_size)
+        elif self.scan_type == "sequential":
+            y = mamba_sequential_scan(delta, A, B_seq, x_in, C_seq, self.D)
+        else:
+            raise ValueError(f"scan_type={self.scan_type!r} not implemented")
 
         y = y * F.silu(z)
         return self.dropout(self.out_proj(y))

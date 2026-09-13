@@ -6,3 +6,7 @@ data/*.txt
 experiments/*/ckpt.pt
 experiments/*/*.pt
 .ipynb_checkpoints/
+
+# ad hoc pasted terminal transcripts from training runs -- the real record
+# is experiments/*/history.json + ROADMAP.md, not these
+tr[0-9]*.txt

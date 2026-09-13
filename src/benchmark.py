@@ -150,6 +150,7 @@ def run_benchmark(cfg, checkpoint_path=None):
         "run_name": cfg.get("run_name", "unnamed"),
         "attn_type": cfg["attn_type"],
         "layer_recipe": cfg.get("layer_recipe"),
+        "scan_type": cfg.get("scan_type"),
         "params_total": n_params_total,
         "params_non_embedding": n_params_non_emb,
         "flops_per_token_forward": analytical_flops_per_token_forward(cfg, n_params_non_emb),
