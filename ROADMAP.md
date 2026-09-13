@@ -151,3 +151,42 @@ Only after an algorithmic variant is working and measured:
   `O(chunk^2 * width * state)` cost, and does that require its scalar-A
   restriction or something less restrictive? Full numbers:
   `experiments/mamba_scan_bench.{json,md}`.
+- 2026-09-13: Mamba scan diagnostic, Phase 3 (model-level validation) --
+  trained `mamba_tiny_chunked` and `hybrid_mamba_attn_tiny_chunked`
+  (`scan_type: chunked`, `chunk_size: 8`, the one point Phase 2 flagged as
+  a real win) for real, 2000 iters, on a Colab GPU rather than the local
+  RTX 2050 (see below for why). Params and FLOPs/token match the
+  unchunked originals exactly (architecture unchanged, as expected), and
+  val_loss/perplexity land within noise (mamba: 1.5633 vs 1.5562; hybrid:
+  1.5668 vs 1.5444) -- correctness holds over a full training run, not
+  just short unit tests. For latency, ran the *unchunged* configs'
+  `benchmark.py` on the same Colab GPU with no checkpoint (latency doesn't
+  depend on trained weights, so random-init is fine for this) to get a
+  same-hardware sequential baseline, since comparing against the original
+  RTX 2050 numbers would have conflated the hardware change with the
+  algorithm change. Result: chunked is **2.6x faster** for mamba_tiny
+  (39.0ms vs 101.5ms/forward) and **3.4x faster** for
+  hybrid_mamba_attn_tiny (27.8ms vs 95.2ms/forward) on the same GPU --
+  better than Phase 2's isolated-scan estimate (~1.5x), plausibly because
+  training's larger batch size (32 vs Phase 2's 8) amortizes the chunked
+  computation's fixed overhead further.
+
+  This directly contradicts an earlier local attempt: training
+  `mamba_tiny_chunked` on the RTX 2050 at batch_size=32 was ~7x *slower*
+  per iteration than sequential (interrupted before completion). Likely
+  explanation: the RTX 2050's limited VRAM (4GB) hits the same
+  `O(chunk_size^2 * d_inner * d_state)` intermediate-tensor cost Phase 2
+  already flagged, but on a memory-constrained card that manifests as
+  severe slowdown (allocator thrashing / possible thermal throttling
+  under sustained load) rather than just "somewhat worse." Not confirmed
+  with a controlled rerun -- noted as the likely cause, not a proven one.
+
+  Net conclusion: the chunked scan is a **real, substantial win on
+  adequately-resourced hardware, but hardware-dependent enough that it
+  should stay an opt-in (`scan_type: chunked`) rather than becoming the
+  default** -- the same setting that helps 2.6-3.4x on a Colab GPU
+  regressed 7x on a memory-constrained laptop GPU. Gates Phase 4 open:
+  the next question is whether Mamba-2/SSD's scalar-per-head `A` (or some
+  less restrictive variant) removes this hardware sensitivity entirely by
+  avoiding the `O(chunk^2 * width * state)` blowup in the first place,
+  rather than just being fast when there happens to be enough VRAM.
